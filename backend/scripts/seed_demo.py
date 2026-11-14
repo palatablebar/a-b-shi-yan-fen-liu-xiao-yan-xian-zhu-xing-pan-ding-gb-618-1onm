@@ -1,13 +1,14 @@
-"""幂等 seed：3 账号 / 6 实验 / 13 变体 / 1,092 行分流样本 / 指标检验 / 4 条决策。
+"""幂等 seed：3 账号 / 6 实验 / 13 变体 / 1,092 行分流样本 / 6 个分析版本 / 4 条决策。
 
 自然键 upsert：
   users.email
   experiments.code
   variants(experiment_id, code)
   assignments(experiment_id, variant_id, channel, metric_key, stat_date)
-  metric_results(experiment_id, variant_code, metric_key)
+  analysis_versions(experiment_id, interval_key)   # 每个实验一段 7 天可用曝光区间
+  metric_results(analysis_version_id, variant_code, metric_key)
   decisions(experiment_id)
-重复执行不新增、不覆盖人工改过的决策/状态；SEED_SUMMARY 两次逐字一致。
+重复执行不新增版本（同一组区间复用）、不覆盖人工改过的决策/状态；SEED_SUMMARY 两次逐字一致。
 
 口径映射（模板 SEED_SUMMARY 键名固定，语义按本项目落点）：
   sources  = 实验数
@@ -20,6 +21,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 
 from src.config.database import session_scope
+from src.models.analysis_version import AnalysisVersion
 from src.models.assignment import Assignment
 from src.models.audit import AuditLog
 from src.models.decision import Decision
@@ -27,7 +29,7 @@ from src.models.experiment import Experiment
 from src.models.metric_result import MetricResult
 from src.models.user import User
 from src.models.variant import Variant
-from src.services import assignment_service, decision_service, experiment_service, metric_service, srm_service
+from src.services import analysis_service, assignment_service, decision_service, experiment_service
 from src.utils.security import hash_password
 
 from scripts.demo_config import (
@@ -141,19 +143,35 @@ def ensure_assignments(db, variants: dict[str, dict[str, Variant]]) -> int:
     return db.scalar(select(func.count()).select_from(Assignment)) or 0
 
 
-def run_checks(db) -> int:
+def ensure_analysis_versions(db, variants: dict[str, dict[str, Variant]]) -> int:
+    """每个实验登记一组「可用曝光区间」（7 天全量）并整套发布。
+
+    同一组区间重复执行只复用版本、就地重跑，不新增版本。
+    """
     experiments = db.scalars(select(Experiment).order_by(Experiment.id)).all()
     for experiment in experiments:
-        srm_service.check(db, experiment)
-        metric_service.run_checks(
+        spec = next((item for item in EXPERIMENTS if item["code"] == experiment.code), None)
+        if spec is None:
+            continue
+        segments = spec["interval"]
+        version, created = analysis_service.register(
             db,
             experiment,
+            segments_raw=segments,
+            note=f"seed：{spec['code']} 7 天可用曝光区间",
             method="bh",
-            variant_code=None,
-            operator_email=SEED_OPERATOR,
+            alpha=0.05,
+            power=0.8,
+            created_by=SEED_OPERATOR,
+        )
+        if not created and version.publication_count > 0:
+            # 已发布过的版本：seed 重跑不重新发布，避免把既有决策顶成「失效」
+            continue
+        analysis_service.run_and_publish(
+            db, experiment, version=version, operator_email=SEED_OPERATOR
         )
     db.flush()
-    return db.scalar(select(func.count()).select_from(MetricResult)) or 0
+    return db.scalar(select(func.count()).select_from(AnalysisVersion)) or 0
 
 
 def ensure_decisions(db) -> int:
@@ -162,12 +180,15 @@ def ensure_decisions(db) -> int:
         experiment = experiments.get(code)
         if experiment is None:
             continue
-        existing = decision_service.get_by_experiment(db, experiment.id)
-        if existing is not None:
+        # 已有决策（无论是否仍有效）都不覆盖，保持 seed 幂等
+        if decision_service.history_by_experiment(db, experiment.id):
+            continue
+        version = analysis_service.active_version(db, experiment)
+        if version is None:
             continue
         primary = db.scalar(
             select(MetricResult).where(
-                MetricResult.experiment_id == experiment.id,
+                MetricResult.analysis_version_id == version.id,
                 MetricResult.is_primary.is_(True),
             )
         )
@@ -222,7 +243,8 @@ def seed_all() -> dict:
         experiments = ensure_experiments(db)
         variants = ensure_variants(db)
         assignments = ensure_assignments(db, variants)
-        findings = run_checks(db)
+        versions = ensure_analysis_versions(db, variants)
+        findings = db.scalar(select(func.count()).select_from(MetricResult)) or 0
         ensure_decisions(db)
         ensure_audit(db)
         pending = db.scalar(
@@ -241,6 +263,7 @@ def seed_all() -> dict:
             "runs": assignments,
             "findings": findings,
             "pending": pending,
+            "versions": versions,
         }
 
 

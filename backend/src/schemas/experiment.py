@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.constants.enums import Channel, ExperimentStatus, MetricKey
 
@@ -76,13 +76,60 @@ class ExperimentPatch(BaseModel):
     traffic_note: str | None = Field(default=None, max_length=500)
 
 
+class ExposureSegmentIn(BaseModel):
+    start: date
+    end: date
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "ExposureSegmentIn":
+        if self.end < self.start:
+            raise ValueError("区间结束日期不能早于开始日期")
+        return self
+
+
+class AnalysisRunIn(BaseModel):
+    """登记一组可用曝光区间并整套重算发布。
+
+    两种写法等价：
+      {"segments": [{"start": "...", "end": "..."}, ...]}
+      {"interval_start": "...", "interval_end": "..."}   # 单段简写
+    """
+
+    segments: list[ExposureSegmentIn] | None = Field(default=None, min_length=1, max_length=20)
+    interval_start: date | None = None
+    interval_end: date | None = None
+    note: str = Field(default="", max_length=500)
+    method: Literal["bh", "bonferroni"] = "bh"
+    alpha: float | None = Field(default=None, gt=0, lt=0.5)
+    power: float | None = Field(default=None, gt=0, lt=1)
+    variant_code: str | None = Field(default=None, max_length=40)
+    reuse_existing: bool = True
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "AnalysisRunIn":
+        if self.segments and (self.interval_start or self.interval_end):
+            raise ValueError("segments 与 interval_start/interval_end 不能同时使用")
+        if not self.segments and not (self.interval_start and self.interval_end):
+            raise ValueError("必须登记至少一段可用曝光区间（segments 或 interval_start/interval_end）")
+        return self
+
+    def segment_dicts(self) -> list[dict]:
+        if self.segments:
+            return [{"start": item.start.isoformat(), "end": item.end.isoformat()} for item in self.segments]
+        return [{"start": self.interval_start.isoformat(), "end": self.interval_end.isoformat()}]
+
+
 class SrmCheckIn(BaseModel):
+    """已弃用：SRM 不再单独重算，统一走 POST /experiments/{id}/analysis-runs。"""
+
     alpha: float | None = Field(default=None, gt=0, lt=0.5)
     power: float | None = Field(default=None, gt=0, lt=1)
     alarm_p: float | None = Field(default=None, gt=0, lt=0.5)
 
 
 class MetricCheckIn(BaseModel):
+    """已弃用：指标检验不再脱离分析版本单独重算。"""
+
     method: Literal["bh", "bonferroni"] = "bh"
     alpha: float | None = Field(default=None, gt=0, lt=0.5)
     variant_code: str | None = Field(default=None, max_length=40)

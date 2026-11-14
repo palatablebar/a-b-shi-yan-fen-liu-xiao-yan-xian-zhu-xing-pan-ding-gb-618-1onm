@@ -22,6 +22,7 @@ def test_viewer_cannot_write_export_audit():
     assert Role.VIEWER.value not in DECISION_ROLES
     assert has_permission("viewer", "metric:read") is True
     assert has_permission("viewer", "metric:run") is False
+    assert has_permission("viewer", "analysis:run") is False
 
 
 def test_analyst_can_export_not_audit():

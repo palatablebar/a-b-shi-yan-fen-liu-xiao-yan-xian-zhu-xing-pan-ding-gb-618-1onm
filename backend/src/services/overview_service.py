@@ -13,10 +13,12 @@ from src.constants.enums import (
     SRM_STATUS_LABELS,
     VERDICT_LABELS,
 )
+from src.models.analysis_version import AnalysisVersion
 from src.models.assignment import Assignment
 from src.models.decision import Decision
 from src.models.experiment import Experiment
 from src.models.metric_result import MetricResult
+from src.services import metric_service
 from src.utils.timeutil import iso_date, local_now, utcnow
 
 
@@ -40,11 +42,27 @@ def overview(db: Session) -> dict:
     srm_alarm_total = (
         db.scalar(select(func.count()).select_from(Experiment).where(Experiment.has_srm_alarm.is_(True))) or 0
     )
-    metric_total = db.scalar(select(func.count()).select_from(MetricResult)) or 0
-    significant_total = (
-        db.scalar(select(func.count()).select_from(MetricResult).where(MetricResult.significant.is_(True))) or 0
+    active_ids = select(Experiment.active_analysis_version_id).where(Experiment.active_analysis_version_id.is_not(None))
+    metric_total = (
+        db.scalar(
+            select(func.count()).select_from(MetricResult).where(MetricResult.analysis_version_id.in_(active_ids))
+        )
+        or 0
     )
-    decided_total = db.scalar(select(func.count()).select_from(Decision)) or 0
+    significant_total = (
+        db.scalar(
+            select(func.count())
+            .select_from(MetricResult)
+            .where(MetricResult.significant.is_(True), MetricResult.analysis_version_id.in_(active_ids))
+        )
+        or 0
+    )
+    # 已决策 = 该实验当前生效版本上已有决策；失效版本上的旧决策不算
+    decided_ids = {
+        row.experiment_id
+        for row in db.scalars(select(Decision).where(Decision.analysis_version_id.in_(active_ids))).all()
+    }
+    decided_total = len(decided_ids)
     pending_total = max(0, experiments_total - decided_total)
 
     status_rows = db.execute(select(Experiment.status, func.count()).group_by(Experiment.status)).all()
@@ -56,19 +74,8 @@ def overview(db: Session) -> dict:
         select(Experiment).where(Experiment.has_srm_alarm.is_(True)).order_by(Experiment.srm_p_value)
     ).all()
 
-    significant_rows = db.scalars(
-        select(MetricResult)
-        .where(MetricResult.significant.is_(True))
-        .order_by(MetricResult.q_value, MetricResult.lift.desc())
-        .limit(6)
-    ).all()
-    experiment_codes = {
-        item.id: (item.code, item.name)
-        for item in db.scalars(
-            select(Experiment).where(Experiment.id.in_([row.experiment_id for row in significant_rows]))
-        ).all()
-    } if significant_rows else {}
-
+    # 校正后显著只看当前生效版本；被调整区间替换掉的旧版本结果不露出
+    significant_rows = metric_service.significant_rows(db, limit=6)
     latest_date = db.scalar(select(func.max(Assignment.stat_date)))
     trend = []
     if latest_date is not None:
@@ -97,8 +104,20 @@ def overview(db: Session) -> dict:
             )
 
     latest_metrics = db.scalars(
-        select(MetricResult).order_by(MetricResult.computed_at.desc(), MetricResult.id.desc()).limit(5)
+        select(MetricResult)
+        .where(MetricResult.analysis_version_id.in_(active_ids))
+        .order_by(MetricResult.computed_at.desc(), MetricResult.id.desc())
+        .limit(5)
     ).all()
+    version_total = db.scalar(select(func.count()).select_from(AnalysisVersion)) or 0
+    active_versions = {
+        row.id: row for row in db.scalars(select(AnalysisVersion).where(AnalysisVersion.id.in_(active_ids))).all()
+    }
+    stale_decision_total = 0
+    for decision in db.scalars(select(Decision)).all():
+        version = active_versions.get(decision.analysis_version_id)
+        if version is None or version.publication_count != decision.analysis_version_publication:
+            stale_decision_total += 1
 
     return {
         "experiments_total": experiments_total,
@@ -110,6 +129,8 @@ def overview(db: Session) -> dict:
         "pending_total": pending_total,
         "sample_total": db.scalar(select(func.coalesce(func.sum(Assignment.samples), 0))) or 0,
         "assignment_rows": db.scalar(select(func.count()).select_from(Assignment)) or 0,
+        "analysis_version_total": version_total,
+        "stale_decision_total": stale_decision_total,
         "worker_alive": worker_alive(),
         "generated_at": utcnow().isoformat(timespec="seconds") + "Z",
         "anchor_date": iso_date(latest_date),
@@ -153,18 +174,20 @@ def overview(db: Session) -> dict:
         ],
         "significant": [
             {
-                "id": row.id,
-                "experiment_id": row.experiment_id,
-                "experiment_code": experiment_codes.get(row.experiment_id, ("", ""))[0],
-                "experiment_name": experiment_codes.get(row.experiment_id, ("", ""))[1],
-                "metric_name": row.metric_name,
-                "variant_code": row.variant_code,
-                "lift": row.lift,
-                "p_value": row.p_value,
-                "q_value": row.q_value,
-                "method": row.method,
-                "verdict": row.verdict,
-                "verdict_label": VERDICT_LABELS.get(row.verdict, row.verdict),
+                "id": row["id"],
+                "experiment_id": row["experiment_id"],
+                "experiment_code": row["experiment_code"],
+                "experiment_name": row["experiment_name"],
+                "analysis_version_id": row["analysis_version_id"],
+                "analysis_revision": row.get("analysis_revision"),
+                "metric_name": row["metric_name"],
+                "variant_code": row["variant_code"],
+                "lift": row["lift"],
+                "p_value": row["p_value"],
+                "q_value": row["q_value"],
+                "method": row["method"],
+                "verdict": row["verdict"],
+                "verdict_label": VERDICT_LABELS.get(row["verdict"], row["verdict"]),
             }
             for row in significant_rows
         ],

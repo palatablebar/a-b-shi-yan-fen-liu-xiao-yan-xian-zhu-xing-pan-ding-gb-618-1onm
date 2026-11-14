@@ -36,6 +36,7 @@ EXPERIMENTS = [
         "baseline_rate": 0.101,
         "planned_mde": 0.011,
         "started_on": date(2026, 3, 2),
+        "interval": [{"start": "2026-03-02", "end": "2026-03-08"}],
         "traffic_note": "计划 50/50；上游分流服务按 device_id 哈希，历史上有过 SDK 版本不均。",
         "variants": [
             {"code": "control", "name": "对照：去购物车", "ratio": 0.5, "is_control": True, "note": "线上原样"},
@@ -57,6 +58,7 @@ EXPERIMENTS = [
         "baseline_rate": 0.101,
         "planned_mde": 0.012,
         "started_on": date(2026, 6, 1),
+        "interval": [{"start": "2026-06-01", "end": "2026-06-07"}],
         "traffic_note": "50/50 均衡分流，7 天累计 20,408 份样本；口径与 exp-2603 一致。",
         "variants": [
             {"code": "control", "name": "对照：无标签", "ratio": 0.5, "is_control": True, "note": ""},
@@ -79,6 +81,7 @@ EXPERIMENTS = [
         "baseline_rate": 0.048,
         "planned_mde": 0.013,
         "started_on": date(2026, 5, 11),
+        "interval": [{"start": "2026-05-11", "end": "2026-05-17"}],
         "traffic_note": "三组均分 34/33/33，推送队列按小时切片。",
         "variants": [
             {"code": "control", "name": "对照：原推送", "ratio": 0.3334, "is_control": True, "note": ""},
@@ -101,6 +104,7 @@ EXPERIMENTS = [
         "baseline_rate": 0.281,
         "planned_mde": 0.015,
         "started_on": date(2026, 5, 18),
+        "interval": [{"start": "2026-05-18", "end": "2026-05-24"}],
         "traffic_note": "50/50；礼包成本 6.2 元/人。",
         "variants": [
             {"code": "control", "name": "对照：无礼包", "ratio": 0.5, "is_control": True, "note": ""},
@@ -122,6 +126,7 @@ EXPERIMENTS = [
         "baseline_rate": 0.083,
         "planned_mde": 0.005,
         "started_on": date(2026, 6, 8),
+        "interval": [{"start": "2026-06-08", "end": "2026-06-14"}],
         "traffic_note": "50/50；因埋点延迟暂停 1 天，样本量未补足。",
         "variants": [
             {"code": "control", "name": "对照：权重 0.6", "ratio": 0.5, "is_control": True, "note": ""},
@@ -143,6 +148,7 @@ EXPERIMENTS = [
         "baseline_rate": 0.612,
         "planned_mde": 0.02,
         "started_on": date(2026, 6, 15),
+        "interval": [{"start": "2026-06-15", "end": "2026-06-21"}],
         "traffic_note": "50/50；待周三决策会确认。",
         "variants": [
             {"code": "control", "name": "对照：热词", "ratio": 0.5, "is_control": True, "note": ""},

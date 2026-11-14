@@ -74,11 +74,22 @@ export const overviewPage = {
         { label: '待决策', value: data.pending_total, unit: '个', tone: 'mustard', hint: `已出决策 ${data.decided_total} 个` },
       ])}
 
+      ${
+        data.stale_decision_total
+          ? `<div class="panel" style="border-color:var(--danger)">
+              <div class="panel-body" style="display:flex;gap:10px;align-items:center;justify-content:space-between">
+                <span><b>${data.stale_decision_total}</b> 条决策引用的分析版本因区间调整已失效，不能拿去上线；需要按当前生效版本重新出结论。</span>
+                <span class="badge stop">已失效</span>
+              </div>
+            </div>`
+          : ''
+      }
+
       <div class="grid-3-1">
         <section class="panel">
           <div class="panel-head">
             <h2>实验台账</h2>
-            <span class="meta">${data.experiments_total} 个 · 锚点 ${esc(data.anchor_date || '—')}</span>
+            <span class="meta">${data.experiments_total} 个 · 分析版本 ${num(data.analysis_version_total)} 个 · 锚点 ${esc(data.anchor_date || '—')}</span>
           </div>
           ${table({
             rows: experiments.items,
@@ -103,9 +114,17 @@ export const overviewPage = {
               },
               {
                 key: 'samples',
-                label: '样本',
+                label: '样本（区间内）',
                 className: 'num',
                 render: (row) => num(row.srm.payload && row.srm.payload.total ? row.srm.payload.total : 0),
+              },
+              {
+                key: 'analysis',
+                label: '分析版本',
+                render: (row) =>
+                  row.analysis && row.analysis.revision
+                    ? `v${esc(row.analysis.revision)}<div class="mono muted">${esc(row.analysis.interval_label)}</div>`
+                    : '<span class="muted">未发布</span>',
               },
             ],
             empty: { title: '还没有登记实验', hint: '去「实验登记」建第一个实验。' },

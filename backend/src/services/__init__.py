@@ -1,5 +1,6 @@
 """服务层聚合。"""
 from src.services import (  # noqa: F401
+    analysis_service,
     assignment_service,
     audit_service,
     auth_service,
@@ -13,6 +14,7 @@ from src.services import (  # noqa: F401
 )
 
 __all__ = [
+    "analysis_service",
     "assignment_service",
     "audit_service",
     "auth_service",

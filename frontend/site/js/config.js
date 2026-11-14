@@ -39,11 +39,12 @@ export const PERMISSIONS = {
     'assignment:read', 'assignment:write',
     'srm:read', 'srm:run',
     'metric:read', 'metric:run',
+    'analysis:read', 'analysis:run',
     'decision:read', 'decision:write',
     'export:read', 'audit:read',
   ],
-  analyst: ['overview:read', 'experiment:read', 'assignment:read', 'srm:read', 'metric:read', 'decision:read', 'export:read'],
-  viewer: ['overview:read', 'experiment:read', 'assignment:read', 'srm:read', 'metric:read', 'decision:read'],
+  analyst: ['overview:read', 'experiment:read', 'assignment:read', 'srm:read', 'metric:read', 'analysis:read', 'decision:read', 'export:read'],
+  viewer: ['overview:read', 'experiment:read', 'assignment:read', 'srm:read', 'metric:read', 'analysis:read', 'decision:read'],
 };
 
 export const ENUMS = {
@@ -67,6 +68,11 @@ export const ENUMS = {
   correction: {
     bh: 'BH-FDR',
     bonferroni: 'Bonferroni',
+  },
+  analysisStatus: {
+    draft: '待发布',
+    active: '生效中',
+    superseded: '已失效',
   },
   metric: {
     cart_rate: '加购转化率',

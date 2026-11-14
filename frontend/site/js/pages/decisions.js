@@ -1,5 +1,6 @@
 import { api } from '../api.js';
 import { ENUMS, can, verdictTone } from '../config.js';
+import { versionLine } from '../analysis.js';
 import {
   badge,
   drawer,
@@ -7,6 +8,7 @@ import {
   errorMessage,
   esc,
   field,
+  fieldValue,
   filterBar,
   fmtP,
   fmtTime,
@@ -23,23 +25,25 @@ function exportButtons(role) {
   if (!can(role, 'export:read')) {
     return '<span class="mono muted">只读角色不能导出（服务端 403）</span>';
   }
-  return `<div style="display:flex;gap:8px;flex-wrap:wrap">
+  return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
     <button class="btn sm ghost" data-export="experiments">实验台账 CSV</button>
     <button class="btn sm ghost" data-export="assignments">分流样本 CSV</button>
     <button class="btn sm ghost" data-export="metrics">指标检验 CSV</button>
     <button class="btn sm ghost" data-export="decisions">决策清单 CSV</button>
-  </div>`;
+  </div>
+  <p class="mono muted" style="margin:6px 0 0">导出的 CSV 带「分析版本 v / 版本状态 / 可用曝光区间」列；默认只导出生效版本，失效版本需显式指定版本号追溯。</p>`;
 }
 
-function openDecision(view, ctx, experiments, pending) {
+function openDecision(view, ctx, experiments, allPending) {
+  const pending = allPending.filter((item) => item.experiment.analysis && item.experiment.analysis.version_id);
   if (!pending.length) {
-    toast('所有实验都已出决策');
+    toast('待决策实验还没有生效分析版本：先在「样本与分流」登记可用曝光区间并整套发布', 'err');
     return;
   }
   const first = pending[0];
   const { root, close } = drawer({
     title: '出决策',
-    subtitle: `${first.experiment.code} · ${first.primary.metric_name || '主指标'} q=${fmtP(first.primary.q_value)}`,
+    subtitle: `${first.experiment.code} · v${first.experiment.analysis?.revision || '—'} · ${first.primary.metric_name || '主指标'} q=${fmtP(first.primary.q_value)}`,
     body: `<form id="decision-form" style="display:grid;gap:12px">
       ${field({
         label: '实验（仅列未决策）',
@@ -57,33 +61,52 @@ function openDecision(view, ctx, experiments, pending) {
         name: 'rationale',
         placeholder: '主指标 lift 10.9%，BH 校正后 q=0.044 < 0.05，样本量已过功效线，上线。',
       })}
+      ${field({
+        label: '依据的分析版本',
+        name: 'analysis_version_id',
+        value: first.experiment.analysis?.version_id || '',
+        options: pending.map((item) => ({
+          value: item.experiment.analysis?.version_id || '',
+          label: `${item.experiment.code} · v${item.experiment.analysis?.revision || '—'} · ${item.experiment.analysis?.interval_label || '无区间'}`,
+        })),
+      })}
       <div class="form-error" id="decision-error"></div>
-      <button class="btn accent" type="submit">写入决策</button>
+      <button class="btn accent" type="submit">写入决策（绑定该分析版本）</button>
     </form>
-    <div class="note" style="margin-top:10px">同一实验只能有一条决策（重复提交返回 409）</div>`,
+    <div class="note" style="margin-top:10px">决策绑定到分析版本：区间一改旧版本立即失效，旧版本上的决策会被拒绝；同一版本只能有一条决策（409）。</div>`,
   });
   const form = root.querySelector('#decision-form');
   const syncSuggestion = () => {
-    const picked = pending.find((item) => String(item.experiment.id) === String(form.experiment_id.value));
+    const picked = pending.find((item) => String(item.experiment.id) === String(fieldValue(form, 'experiment_id')));
     if (!picked) return;
-    form.verdict.value = picked.suggested;
-    form.rationale.value = picked.rationale;
+    form.elements.namedItem('verdict').value = picked.suggested;
+    form.elements.namedItem('rationale').value = picked.rationale;
+    const versionControl = form.elements.namedItem('analysis_version_id');
+    if (versionControl) versionControl.value = picked.experiment.analysis?.version_id || '';
   };
-  form.experiment_id.addEventListener('change', syncSuggestion);
-  form.rationale.value = first.rationale;
+  form.elements.namedItem('experiment_id').addEventListener('change', syncSuggestion);
+  form.elements.namedItem('rationale').value = first.rationale;
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const errorNode = root.querySelector('#decision-error');
     try {
-      await api.post(`/api/experiments/${form.experiment_id.value}/decisions`, {
-        verdict: form.verdict.value,
-        rationale: form.rationale.value.trim(),
-      });
-      toast('决策已写入');
+      const payload = {
+        verdict: fieldValue(form, 'verdict'),
+        rationale: fieldValue(form, 'rationale', { trim: true }),
+      };
+      const versionValue = fieldValue(form, 'analysis_version_id');
+      if (versionValue) payload.analysis_version_id = Number(versionValue);
+      await api.post(`/api/experiments/${fieldValue(form, 'experiment_id')}/decisions`, payload);
+      toast('决策已写入，已绑定分析版本');
       close();
       await decisionsPage.render(view, ctx);
     } catch (err) {
-      errorNode.textContent = err.code === 'CONFLICT' ? '这个实验已经有决策了（409）' : errorMessage(err);
+      errorNode.textContent =
+        err.code === 'CONFLICT'
+          ? err.detail?.reason || '该分析版本已有决策或版本已失效（409）'
+          : err.code === 'NO_ANALYSIS_VERSION'
+            ? '还没有生效分析版本（409）：先在「样本与分流」登记可用曝光区间'
+            : errorMessage(err);
     }
   });
 }
@@ -109,7 +132,8 @@ export const decisionsPage = {
       return;
     }
 
-    const decidedIds = new Set(decisions.items.map((item) => String(item.experiment_id)));
+    // 只有「当前生效版本上已有决策」的实验算已决策；失效版本上的旧决策不算
+    const decidedIds = new Set(decisions.items.filter((item) => !item.stale).map((item) => String(item.experiment_id)));
     const pendingExperiments = experiments.items.filter((item) => !decidedIds.has(String(item.id)));
     const details = await Promise.all(
       pendingExperiments.map((item) => api.get(`/api/experiments/${item.id}`).catch(() => item)),
@@ -117,13 +141,15 @@ export const decisionsPage = {
     const pending = details
       .map((experiment) => {
         const primary = (experiment.metrics || []).find((metric) => metric.is_primary) || {};
+        const analysis = experiment.analysis || {};
+        const staleDecision = (experiment.decision || null) === null && (experiment.decision_history || []).some((item) => item.stale);
         const suggested = primary.significant ? (primary.lift >= 0 ? 'ship' : 'stop') : 'continue';
         const rationale = primary.metric_name
           ? `${primary.metric_name}：lift ${signedPct(primary.lift, 1)}，p=${fmtP(primary.p_value)}，q=${fmtP(primary.q_value)}；${
               primary.significant ? '校正后显著' : '校正后不显著，样本或效应不足'
             }，建议${ENUMS.verdict[suggested]}。`
           : '还没有检验结果，建议继续观察。';
-        return { experiment, primary, suggested, rationale };
+        return { experiment, primary, suggested, rationale, staleDecision };
       });
 
     view.innerHTML = `
@@ -132,7 +158,11 @@ export const decisionsPage = {
           <h2>决策与导出</h2>
           <div style="display:flex;gap:8px;align-items:center">
             <span class="meta">已决策 ${decisions.total} / ${experiments.total}</span>
-            ${can(ctx.user.role, 'decision:write') ? '<button class="btn sm accent" id="new-decision">出决策</button>' : '<span class="mono muted">决策需实验负责人</span>'}
+            ${
+              can(ctx.user.role, 'decision:write')
+                ? `<button class="btn sm accent" id="new-decision" ${pending.some((item) => item.experiment.analysis && item.experiment.analysis.version_id) ? '' : 'disabled'}>出决策</button>`
+                : '<span class="mono muted">决策需实验负责人</span>'
+            }
           </div>
         </div>
         <div class="panel-body">
@@ -159,6 +189,14 @@ export const decisionsPage = {
           columns: [
             { key: 'experiment_code', label: '实验', className: 'mono nowrap' },
             { key: 'experiment_name', label: '名称' },
+            {
+              key: 'analysis_revision',
+              label: '分析版本',
+              render: (row) =>
+                `v${esc(row.analysis_revision)}${row.analysis_version_publication ? `.${esc(row.analysis_version_publication)}` : ''}${
+                  row.stale ? ' ' + badge('stop', '已失效') : ''
+                }<div class="mono muted">${esc(row.interval_label)}</div>`,
+            },
             { key: 'verdict', label: '结论', render: (row) => badge(verdictTone(row.verdict), row.verdict_label) },
             { key: 'rationale', label: '理由', render: (row) => `<span>${esc(row.rationale)}</span>` },
             { key: 'decided_by', label: '决策人', className: 'mono nowrap' },
@@ -184,6 +222,10 @@ export const decisionsPage = {
                       <div class="mono muted">${esc(item.experiment.primary_metric_label)} · SRM ${esc(item.experiment.srm.status_label)} · p=${fmtP(
                         item.experiment.srm.p_value,
                       )}</div>
+                      <div>${item.experiment.analysis?.version_id
+                        ? versionLine({ revision: item.experiment.analysis.revision, status: 'active', interval_label: item.experiment.analysis.interval_label, published_at: item.experiment.analysis.published_at })
+                        : '<span class="fail">还没有生效分析版本：先在「样本与分流」登记可用曝光区间</span>'}</div>
+                      ${item.staleDecision ? '<p class="fail" style="margin:0">区间调整后旧版本的决策已失效，需要按当前版本重新出结论。</p>' : ''}
                       ${item.primary.metric_name
                         ? `<div class="checkline">
                             <div class="item"><span class="k">lift</span><span class="v">${signedPct(item.primary.lift, 1)}</span></div>
@@ -235,7 +277,7 @@ export const decisionsPage = {
         button.disabled = true;
         try {
           await api.download(`/api/exports/${kind}.csv`, `${kind}.csv`);
-          toast(`已下载 ${kind}.csv`);
+          toast(`已下载 ${kind}.csv（含分析版本与区间列）`);
         } catch (err) {
           toast(errorMessage(err), 'err');
         } finally {

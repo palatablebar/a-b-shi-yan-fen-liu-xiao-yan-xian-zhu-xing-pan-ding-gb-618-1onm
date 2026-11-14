@@ -18,6 +18,7 @@ def export_csv(
     kind: str,
     request: Request,
     experiment_id: int | None = Query(default=None),
+    analysis_version_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
     principal: dict = Depends(require_roles(*EXPORT_ROLES)),
 ):
@@ -25,4 +26,4 @@ def export_csv(
         from src.utils.errors import AppError
 
         raise AppError("NOT_FOUND", 404, {"entity": "export", "kind": kind, "allowed": sorted(ALLOWED)})
-    return export_controller.export_csv(db, kind, experiment_id, principal, request)
+    return export_controller.export_csv(db, kind, experiment_id, principal, request, analysis_version_id)

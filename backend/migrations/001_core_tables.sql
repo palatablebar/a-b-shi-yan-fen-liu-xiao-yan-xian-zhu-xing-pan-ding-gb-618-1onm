@@ -1,5 +1,6 @@
 -- 参考建表语句（运行时由 SQLAlchemy Base.metadata.create_all 建表）。
 -- 口径：MySQL 8.0 / utf8mb4；assignments 的自然键保证 seed 幂等。
+-- 分析版本：同一实验下归一化区间唯一；指标结果与决策都挂 analysis_version_id。
 
 CREATE TABLE IF NOT EXISTS experiments (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -16,6 +17,13 @@ CREATE TABLE IF NOT EXISTS experiments (
   traffic_note TEXT NULL,
   started_on DATE NULL,
   ended_on DATE NULL,
+  active_analysis_version_id INT NULL,
+  active_interval_key VARCHAR(400) NULL,
+  active_interval_segments JSON NULL,
+  active_interval_days INT NULL,
+  active_analysis_revision INT NULL,
+  active_analysis_publication INT NULL,
+  active_analysis_published_at DATETIME NULL,
   srm_chi2 FLOAT NULL,
   srm_df INT NULL,
   srm_p_value FLOAT NULL,
@@ -32,6 +40,45 @@ CREATE TABLE IF NOT EXISTS experiments (
   KEY ix_experiments_status (status),
   KEY ix_experiments_primary_metric (primary_metric),
   KEY ix_experiments_has_srm_alarm (has_srm_alarm)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS analysis_versions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  experiment_id INT NOT NULL,
+  revision INT NOT NULL DEFAULT 1,
+  status VARCHAR(16) NOT NULL DEFAULT 'draft',
+  publication_count INT NOT NULL DEFAULT 0,
+  interval_key VARCHAR(400) NOT NULL,
+  segments JSON NOT NULL,
+  interval_days INT NOT NULL DEFAULT 0,
+  note TEXT,
+  method VARCHAR(16) NOT NULL DEFAULT 'bh',
+  alpha FLOAT NOT NULL DEFAULT 0.05,
+  power_target FLOAT NOT NULL DEFAULT 0.8,
+  srm_chi2 FLOAT NULL,
+  srm_df INT NULL,
+  srm_p_value FLOAT NULL,
+  srm_status VARCHAR(12) NOT NULL DEFAULT 'unknown',
+  srm_alarm TINYINT(1) NOT NULL DEFAULT 0,
+  srm_checked_at DATETIME NULL,
+  required_per_variant INT NULL,
+  power_at_current FLOAT NULL,
+  mde_at_current FLOAT NULL,
+  srm_payload JSON NULL,
+  metrics_count INT NOT NULL DEFAULT 0,
+  significant_count INT NOT NULL DEFAULT 0,
+  suggestion_verdict VARCHAR(16) NOT NULL DEFAULT 'continue',
+  suggestion_rationale TEXT,
+  suggested_at DATETIME NULL,
+  created_by VARCHAR(160) NOT NULL DEFAULT 'system',
+  created_at DATETIME NOT NULL,
+  published_at DATETIME NULL,
+  superseded_at DATETIME NULL,
+  failure_reason TEXT,
+  UNIQUE KEY uq_analysis_version_interval (experiment_id, interval_key),
+  KEY ix_analysis_versions_experiment (experiment_id),
+  KEY ix_analysis_versions_status (status),
+  CONSTRAINT fk_analysis_version_experiment FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS variants (
@@ -67,6 +114,7 @@ CREATE TABLE IF NOT EXISTS assignments (
 CREATE TABLE IF NOT EXISTS metric_results (
   id INT AUTO_INCREMENT PRIMARY KEY,
   experiment_id INT NOT NULL,
+  analysis_version_id INT NULL,
   variant_id INT NULL,
   variant_code VARCHAR(40) NOT NULL,
   variant_name VARCHAR(120) NOT NULL DEFAULT '',
@@ -84,21 +132,27 @@ CREATE TABLE IF NOT EXISTS metric_results (
   payload JSON NULL,
   computed_at DATETIME NOT NULL,
   computed_by VARCHAR(160) NOT NULL DEFAULT 'system',
-  UNIQUE KEY uq_metric_experiment_variant_metric (experiment_id, variant_code, metric_key),
-  CONSTRAINT fk_metric_experiment FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+  UNIQUE KEY uq_metric_version_variant_metric (analysis_version_id, variant_code, metric_key),
+  CONSTRAINT fk_metric_experiment FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE,
+  CONSTRAINT fk_metric_version FOREIGN KEY (analysis_version_id) REFERENCES analysis_versions(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS decisions (
   id INT AUTO_INCREMENT PRIMARY KEY,
   experiment_id INT NOT NULL,
+  analysis_version_id INT NOT NULL,
+  analysis_version_revision INT NOT NULL DEFAULT 1,
+  analysis_version_publication INT NOT NULL DEFAULT 0,
+  interval_key VARCHAR(400) NOT NULL DEFAULT '',
   verdict VARCHAR(16) NOT NULL,
   rationale TEXT,
   decided_by VARCHAR(160) NOT NULL DEFAULT '',
   decided_at DATETIME NOT NULL,
   seed_key VARCHAR(120) NULL UNIQUE,
   updated_at DATETIME NOT NULL,
-  UNIQUE KEY uq_decision_experiment (experiment_id),
-  CONSTRAINT fk_decision_experiment FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+  UNIQUE KEY uq_decision_experiment_version_publication (experiment_id, analysis_version_id, analysis_version_publication),
+  CONSTRAINT fk_decision_experiment FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE,
+  CONSTRAINT fk_decision_version FOREIGN KEY (analysis_version_id) REFERENCES analysis_versions(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS users (

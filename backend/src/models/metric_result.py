@@ -1,4 +1,7 @@
-"""指标检验结果（算法 B 落库）：每个 (实验, 变体, 指标) 一行。"""
+"""指标检验结果（算法 B 落库）：每个 (分析版本, 变体, 指标) 一行。
+
+同一实验的不同分析版本各自保留整套结果，重跑同一区间就地覆盖本版本结果。
+"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -13,11 +16,16 @@ from src.utils.timeutil import utcnow
 class MetricResult(Base):
     __tablename__ = "metric_results"
     __table_args__ = (
-        UniqueConstraint("experiment_id", "variant_code", "metric_key", name="uq_metric_experiment_variant_metric"),
+        UniqueConstraint(
+            "analysis_version_id", "variant_code", "metric_key", name="uq_metric_version_variant_metric"
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     experiment_id: Mapped[int] = mapped_column(ForeignKey("experiments.id", ondelete="CASCADE"), index=True)
+    analysis_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("analysis_versions.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     variant_id: Mapped[int | None] = mapped_column(ForeignKey("variants.id", ondelete="SET NULL"), nullable=True)
     variant_code: Mapped[str] = mapped_column(String(40), index=True)
     variant_name: Mapped[str] = mapped_column(String(120), default="")

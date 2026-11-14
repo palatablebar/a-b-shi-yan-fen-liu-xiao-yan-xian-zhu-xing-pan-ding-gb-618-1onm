@@ -1,5 +1,12 @@
 /** 无框架 UI 组件：表格 / 抽屉 / 过滤条 / 分流条 / 森林图 / 空态 / toast。 */
 
+/** 表单字段安全读取：用 elements.namedItem，避开 form.method / form.name 等内置属性冲突。 */
+export function fieldValue(form, name, { trim = false } = {}) {
+  const control = form?.elements?.namedItem(name) || form?.querySelector(`[name="${name}"]`);
+  const value = control && 'value' in control ? String(control.value) : '';
+  return trim ? value.trim() : value;
+}
+
 export function esc(value) {
   return String(value ?? '').replace(
     /[&<>"']/g,

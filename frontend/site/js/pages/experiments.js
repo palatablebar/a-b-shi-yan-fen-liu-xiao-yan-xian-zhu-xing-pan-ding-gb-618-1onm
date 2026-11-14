@@ -1,5 +1,6 @@
 import { api } from '../api.js';
 import { ENUMS, can, srmTone, statusTone, verdictTone } from '../config.js';
+import { intervalChips, versionLine } from '../analysis.js';
 import {
   badge,
   drawer,
@@ -7,6 +8,7 @@ import {
   errorMessage,
   esc,
   field,
+  fieldValue,
   filterBar,
   fmtP,
   fmtTime,
@@ -48,6 +50,7 @@ function detailBody(item) {
   const srm = item.srm || {};
   const payload = srm.payload || {};
   const metrics = item.metrics || [];
+  const analysis = item.analysis || {};
   return `${kv([
     ['编号', `<span class="mono">${esc(item.code)}</span>`],
     ['负责人', esc(item.owner)],
@@ -56,7 +59,7 @@ function detailBody(item) {
     ['基准转化率', pct(item.baseline_rate, 2)],
     ['目标最小效应', pct(item.planned_mde, 2)],
     ['α / 目标功效', `${item.alpha} / ${pct(item.power_target, 0)}`],
-    ['样本合计', `${num(item.sample_total)} 份 · ${num(item.assignment_rows)} 行（主指标口径）`],
+    ['样本合计', `${num(item.sample_total)} 份 · ${num(item.assignment_rows)} 行（主指标口径，仅区间内）`],
     ['分流说明', esc(item.traffic_note || '—')],
     ['日期', `${esc(item.started_on || '—')} ~ ${esc(item.ended_on || '进行中')}`],
   ])}
@@ -74,6 +77,10 @@ function detailBody(item) {
       { key: 'is_control', label: '角色', render: (row) => (row.is_control ? badge('info', '对照') : badge('medium', '实验')) },
     ],
   })}
+  <h3 style="margin:14px 0 6px;font-size:0.95rem">分析版本与可用曝光区间</h3>
+  <div>${versionLine(analysis.version_id ? { revision: analysis.revision, status: 'active', interval_label: analysis.interval_label, published_at: analysis.published_at } : null)}</div>
+  <div style="margin-top:6px">${analysis.interval_segments && analysis.interval_segments.length ? intervalChips(analysis.interval_segments) : '<span class="muted">未登记</span>'}</div>
+
   <h3 style="margin:14px 0 6px;font-size:0.95rem">SRM 与功效快照</h3>
   ${
     srm.checked_at
@@ -85,9 +92,9 @@ function detailBody(item) {
         <div style="margin-top:8px">${splitBar(payload.cells || [], srm.alarm)}</div>
         <p class="muted" style="margin:6px 0">${esc(payload.note || '')}</p>
         <div class="note">当前功效 ${pct(srm.power_at_current, 1)} · 能检测的最小效应 ${pct(srm.mde_at_current, 2)}</div>`
-      : '<p class="muted">还没跑过 SRM 校验，去「样本与分流」跑一次。</p>'
+      : '<p class="muted">还没有生效分析版本，去「样本与分流」登记可用曝光区间并整套发布。</p>'
   }
-  <h3 style="margin:14px 0 6px;font-size:0.95rem">指标检验（最近一次）</h3>
+  <h3 style="margin:14px 0 6px;font-size:0.95rem">指标检验（当前生效版本）</h3>
   ${
     metrics.length
       ? table({
@@ -108,10 +115,18 @@ function detailBody(item) {
     item.decision
       ? `<div class="verdict-card ${esc(item.decision.verdict)}">
           <span class="verdict">${esc(item.decision.verdict_label)}</span>
-          <span class="muted">${esc(item.decision.decided_by)} · ${fmtTime(item.decision.decided_at)}</span>
+          <span class="muted">${esc(item.decision.decided_by)} · ${fmtTime(item.decision.decided_at)} · 依据 v${esc(item.decision.analysis_revision)}（${esc(item.decision.interval_label)}）</span>
           <p style="margin:0">${esc(item.decision.rationale)}</p>
         </div>`
-      : '<p class="muted">还没有出决策。</p>'
+      : '<p class="muted">当前生效版本还没有出决策。</p>'
+  }
+  ${
+    (item.decision_history || []).filter((row) => row.stale).length
+      ? `<div class="note" style="margin-top:6px">${(item.decision_history || [])
+          .filter((row) => row.stale)
+          .map((row) => `已失效：v${esc(row.analysis_revision)}（${esc(row.interval_label)}）${esc(row.verdict_label)}，区间调整后不可再用。`)
+          .join('<br />')}</div>`
+      : ''
   }`;
 }
 
@@ -226,15 +241,15 @@ function openCreate(view, ctx) {
     button.textContent = '登记中…';
     try {
       const created = await api.post('/api/experiments', {
-        code: form.code.value.trim(),
-        name: form.name.value.trim(),
-        hypothesis: form.hypothesis.value.trim(),
-        primary_metric: form.primary_metric.value,
-        baseline_rate: Number(form.baseline_rate.value),
-        planned_mde: Number(form.planned_mde.value),
-        alpha: Number(form.alpha.value),
-        power_target: Number(form.power_target.value),
-        traffic_note: form.traffic_note.value.trim() || null,
+        code: fieldValue(form, 'code', { trim: true }),
+        name: fieldValue(form, 'name', { trim: true }),
+        hypothesis: fieldValue(form, 'hypothesis', { trim: true }),
+        primary_metric: fieldValue(form, 'primary_metric'),
+        baseline_rate: Number(fieldValue(form, 'baseline_rate')),
+        planned_mde: Number(fieldValue(form, 'planned_mde')),
+        alpha: Number(fieldValue(form, 'alpha')),
+        power_target: Number(fieldValue(form, 'power_target')),
+        traffic_note: fieldValue(form, 'traffic_note', { trim: true }) || null,
         variants: filtered,
       });
       toast(`实验 ${created.code} 已登记`);

@@ -1,7 +1,7 @@
 import { api } from '../api.js';
 import { session } from '../store.js';
 import { BRAND } from '../config.js';
-import { errorMessage, esc, toast } from '../ui.js';
+import { errorMessage, esc, fieldValue, toast } from '../ui.js';
 
 export const loginPage = {
   async render(root, ctx) {
@@ -63,8 +63,8 @@ export const loginPage = {
       submit.textContent = '正在核对…';
       try {
         const result = await api.post('/api/auth/login', {
-          email: form.email.value.trim(),
-          password: form.password.value,
+          email: fieldValue(form, 'email', { trim: true }),
+          password: fieldValue(form, 'password'),
         });
         session.set(result.access_token, result.user);
         toast(`登记人：${result.user.display_name}`);

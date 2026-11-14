@@ -7,6 +7,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from src.constants.enums import CHANNEL_LABELS, CHANNEL_ORDER, METRIC_LABELS
+from src.services.analysis_service import assignment_date_filter
 from src.models.assignment import Assignment
 from src.models.experiment import Experiment
 from src.models.variant import Variant
@@ -41,11 +42,17 @@ def list_assignments(
     variant_code: str | None = None,
     channel: str | None = None,
     metric_key: str | None = None,
+    segments: list[dict] | None = None,
+    analysis_version_id: int | None = None,
     limit: int = 60,
     offset: int = 0,
 ) -> dict:
     stmt = select(Assignment).where(Assignment.experiment_id == experiment_id)
     count_stmt = select(func.count()).select_from(Assignment).where(Assignment.experiment_id == experiment_id)
+    interval = assignment_date_filter(segments)
+    if interval is not None:
+        stmt = stmt.where(interval)
+        count_stmt = count_stmt.where(interval)
     if variant_code:
         variant = db.scalar(select(Variant).where(Variant.experiment_id == experiment_id, Variant.code == variant_code))
         variant_id = variant.id if variant else -1
@@ -72,10 +79,16 @@ def list_assignments(
     }
 
 
-def variant_totals(db: Session, experiment: Experiment, metric_key: str | None = None) -> list[dict]:
-    """按变体聚合分流样本（SRM 的输入）。"""
+def variant_totals(
+    db: Session,
+    experiment: Experiment,
+    metric_key: str | None = None,
+    segments: list[dict] | None = None,
+) -> list[dict]:
+    """按变体聚合分流样本（SRM 的输入），只统计可用曝光区间内的行。"""
     metric = metric_key or experiment.primary_metric
-    rows = db.execute(
+    interval = assignment_date_filter(segments)
+    stmt = (
         select(
             Variant.id,
             Variant.code,
@@ -88,7 +101,11 @@ def variant_totals(db: Session, experiment: Experiment, metric_key: str | None =
         )
         .join(Assignment, and_(Assignment.variant_id == Variant.id, Assignment.metric_key == metric))
         .where(Variant.experiment_id == experiment.id)
-        .group_by(Variant.id, Variant.code, Variant.name, Variant.ratio, Variant.is_control, Variant.sort_order)
+    )
+    if interval is not None:
+        stmt = stmt.where(interval)
+    rows = db.execute(
+        stmt.group_by(Variant.id, Variant.code, Variant.name, Variant.ratio, Variant.is_control, Variant.sort_order)
         .order_by(Variant.sort_order, Variant.id)
     ).all()
     if not rows:
@@ -126,17 +143,25 @@ def variant_totals(db: Session, experiment: Experiment, metric_key: str | None =
     ]
 
 
-def metric_keys(db: Session, experiment_id: int) -> list[str]:
-    rows = db.execute(
-        select(Assignment.metric_key).where(Assignment.experiment_id == experiment_id).group_by(Assignment.metric_key)
-    ).all()
+def metric_keys(db: Session, experiment_id: int, segments: list[dict] | None = None) -> list[str]:
+    stmt = select(Assignment.metric_key).where(Assignment.experiment_id == experiment_id)
+    interval = assignment_date_filter(segments)
+    if interval is not None:
+        stmt = stmt.where(interval)
+    rows = db.execute(stmt.group_by(Assignment.metric_key)).all()
     return [row[0] for row in rows]
 
 
-def channel_matrix(db: Session, experiment: Experiment, metric_key: str | None = None) -> dict:
-    """渠道 × 变体样本矩阵（页面「各变体样本对照」表）。"""
+def channel_matrix(
+    db: Session,
+    experiment: Experiment,
+    metric_key: str | None = None,
+    segments: list[dict] | None = None,
+) -> dict:
+    """渠道 × 变体样本矩阵（页面「各变体样本对照」表），只统计区间内。"""
     metric = metric_key or experiment.primary_metric
-    rows = db.execute(
+    interval = assignment_date_filter(segments)
+    stmt = (
         select(
             Assignment.channel,
             Variant.code,
@@ -145,8 +170,10 @@ def channel_matrix(db: Session, experiment: Experiment, metric_key: str | None =
         )
         .join(Variant, Variant.id == Assignment.variant_id)
         .where(Assignment.experiment_id == experiment.id, Assignment.metric_key == metric)
-        .group_by(Assignment.channel, Variant.code)
-    ).all()
+    )
+    if interval is not None:
+        stmt = stmt.where(interval)
+    rows = db.execute(stmt.group_by(Assignment.channel, Variant.code)).all()
     variants = db.scalars(
         select(Variant).where(Variant.experiment_id == experiment.id).order_by(Variant.sort_order, Variant.id)
     ).all()
@@ -164,14 +191,23 @@ def channel_matrix(db: Session, experiment: Experiment, metric_key: str | None =
     }
 
 
-def daily_series(db: Session, experiment: Experiment, metric_key: str | None = None) -> list[dict]:
+def daily_series(
+    db: Session,
+    experiment: Experiment,
+    metric_key: str | None = None,
+    segments: list[dict] | None = None,
+) -> list[dict]:
+    """按日聚合，仅区间内；区间外的日期不会出现在趋势里。"""
     metric = metric_key or experiment.primary_metric
-    rows = db.execute(
-        select(Assignment.stat_date, func.coalesce(func.sum(Assignment.samples), 0), func.coalesce(func.sum(Assignment.conversions), 0))
-        .where(Assignment.experiment_id == experiment.id, Assignment.metric_key == metric)
-        .group_by(Assignment.stat_date)
-        .order_by(Assignment.stat_date)
-    ).all()
+    stmt = select(
+        Assignment.stat_date,
+        func.coalesce(func.sum(Assignment.samples), 0),
+        func.coalesce(func.sum(Assignment.conversions), 0),
+    ).where(Assignment.experiment_id == experiment.id, Assignment.metric_key == metric)
+    interval = assignment_date_filter(segments)
+    if interval is not None:
+        stmt = stmt.where(interval)
+    rows = db.execute(stmt.group_by(Assignment.stat_date).order_by(Assignment.stat_date)).all()
     return [
         {"date": iso_date(row[0]), "samples": int(row[1]), "conversions": int(row[2])} for row in rows
     ]

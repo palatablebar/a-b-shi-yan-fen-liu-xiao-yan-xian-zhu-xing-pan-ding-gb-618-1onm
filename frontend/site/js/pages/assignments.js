@@ -1,5 +1,6 @@
 import { api } from '../api.js';
 import { ENUMS, can } from '../config.js';
+import { intervalForm, parseSegmentText, versionLine, versionsTable } from '../analysis.js';
 import {
   badge,
   drawer,
@@ -7,6 +8,7 @@ import {
   errorMessage,
   esc,
   field,
+  fieldValue,
   filterBar,
   fmtP,
   fmtTime,
@@ -38,14 +40,19 @@ function pickExperiment(items, preferred) {
 function srmCard(experiment) {
   const srm = experiment.srm || {};
   const payload = srm.payload || {};
-  if (!srm.checked_at) {
-    return `<div class="panel"><div class="panel-head"><h2>SRM 与功效校验</h2><span class="meta">未校验</span></div>
-      <div class="panel-body"><p class="muted">这个实验还没跑过分流校验。点上方「跑 SRM 校验」，算法会按 χ² 与样本量缺口给出结论。</p></div></div>`;
+  const analysis = experiment.analysis || {};
+  if (!srm.checked_at || !analysis.version_id) {
+    return `<div class="panel"><div class="panel-head"><h2>SRM 与功效校验</h2><span class="meta">未发布</span></div>
+      <div class="panel-body"><p class="muted">这个实验还没有生效的分析版本。先登记一组可用曝光区间并整套发布，分流校验只按这组区间统计，不会把故障期和前后两次运行混在一起。</p></div></div>`;
   }
   return `<div class="panel">
     <div class="panel-head">
       <h2>SRM 与功效校验</h2>
-      <span class="meta">${fmtTime(srm.checked_at)}</span>
+      <span class="meta">${versionLine(analysis)}</span>
+    </div>
+    <div class="panel-head" style="border-top:0;padding-top:0">
+      <span class="mono muted">可用曝光区间 ${esc(analysis.interval_label)} · ${analysis.interval_days} 天</span>
+      <span class="mono muted">校验时间 ${fmtTime(srm.checked_at)}</span>
     </div>
     <div class="panel-body" style="display:grid;gap:12px">
       ${splitBar(payload.cells || [], srm.alarm)}
@@ -108,13 +115,13 @@ function openEntry(view, ctx, experiments) {
     const form = event.target;
     const errorNode = root.querySelector('#entry-error');
     try {
-      await api.post(`/api/experiments/${form.experiment_id.value}/assignments`, {
-        variant_code: form.variant_code.value,
-        channel: form.channel.value,
-        metric_key: form.metric_key.value,
-        stat_date: form.stat_date.value,
-        samples: Number(form.samples.value),
-        conversions: Number(form.conversions.value),
+      await api.post(`/api/experiments/${fieldValue(form, 'experiment_id')}/assignments`, {
+        variant_code: fieldValue(form, 'variant_code'),
+        channel: fieldValue(form, 'channel'),
+        metric_key: fieldValue(form, 'metric_key'),
+        stat_date: fieldValue(form, 'stat_date'),
+        samples: Number(fieldValue(form, 'samples')),
+        conversions: Number(fieldValue(form, 'conversions')),
       });
       toast('样本已写入');
       close();
@@ -122,6 +129,53 @@ function openEntry(view, ctx, experiments) {
     } catch (err) {
       errorNode.textContent =
         err.code === 'CONFLICT' ? '这个 变体×渠道×日期×指标 的样本已存在（409），请改数值或换日期' : errorMessage(err);
+    }
+  });
+}
+
+function openAnalysis(view, ctx, experiment) {
+  const analysis = experiment.analysis || {};
+  const { root, close } = drawer({
+    title: '登记可用曝光区间',
+    subtitle: `${experiment.code} · 同一组区间重跑复用版本，区间一改旧版本即失效`,
+    body: `${intervalForm({ segments: experiment.currentSegments || analysis.interval_segments || [], note: '', method: 'bh' })}`,
+  });
+  const form = root.querySelector('#analysis-form');
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const errorNode = root.querySelector('#analysis-error');
+    const button = form.querySelector('button[type=submit]');
+    let segments;
+    try {
+      segments = parseSegmentText(fieldValue(form, 'segments'));
+    } catch (err) {
+      errorNode.textContent = err.message;
+      return;
+    }
+    button.disabled = true;
+    button.textContent = '整套计算中…';
+    try {
+      const result = await api.post(`/api/experiments/${experiment.id}/analysis-runs`, {
+        segments,
+        note: fieldValue(form, 'note', { trim: true }),
+        method: fieldValue(form, 'method'),
+      });
+      toast(
+        result.created
+          ? `分析版本 v${result.version.revision} 已发布（${result.summary.metrics_count} 条指标）`
+          : `同一组区间已存在，v${result.version.revision} 就地重跑并整套发布`,
+      );
+      close();
+      await assignmentsPage.render(view, ctx);
+    } catch (err) {
+      errorNode.textContent =
+        err.code === 'NO_EXPOSURE'
+          ? '登记的区间内没有可用样本（422）；实验仍沿用上一版 active 结果，请调整区间或补录样本'
+          : err.code === 'CONFLICT'
+            ? '同一组区间重跑复用版本，不会新增版本'
+            : errorMessage(err);
+      button.disabled = false;
+      button.textContent = '登记区间并整套发布';
     }
   });
 }
@@ -146,8 +200,9 @@ export const assignmentsPage = {
 
     let samples;
     let rows;
+    let versions;
     try {
-      [samples, rows] = await Promise.all([
+      [samples, rows, versions] = await Promise.all([
         api.get(`/api/experiments/${experiment.id}/samples`, { metric_key: state.metricKey }),
         api.get(`/api/experiments/${experiment.id}/assignments`, {
           limit: 40,
@@ -155,6 +210,7 @@ export const assignmentsPage = {
           metric_key: state.metricKey,
           variant_code: state.variantCode,
         }),
+        api.get(`/api/experiments/${experiment.id}/analysis-versions`),
       ]);
     } catch (err) {
       view.innerHTML = errorBox(errorMessage(err));
@@ -174,8 +230,8 @@ export const assignmentsPage = {
           <div style="display:flex;gap:8px;align-items:center">
             <span class="meta">${num(totalSamples)} 份样本 · ${num(samples.metric_keys.length)} 个指标口径</span>
             ${
-              can(ctx.user.role, 'srm:run')
-                ? '<button class="btn sm accent" id="run-srm">跑 SRM 校验</button>'
+              can(ctx.user.role, 'analysis:run')
+                ? `<button class="btn sm accent" id="run-analysis">${experiment.analysis && experiment.analysis.version_id ? '按当前区间整套重跑' : '登记区间并整套发布'}</button>`
                 : '<span class="mono muted">只读角色仅可查看</span>'
             }
           </div>
@@ -211,6 +267,29 @@ export const assignmentsPage = {
             ],
             actions: can(ctx.user.role, 'assignment:write') ? '<button class="btn sm ghost" id="entry-sample">录入样本</button>' : '',
           })}
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>分析版本</h2>
+          <span class="meta">可用曝光区间决定所有口径</span>
+        </div>
+        <div class="panel-body" style="display:grid;gap:8px">
+          <div>${versionLine(experiment.analysis)}</div>
+          ${
+            samples.interval_applied
+              ? `<p class="muted" style="margin:0">本次只统计可用曝光区间内的样本；区间外 <b>${num(samples.excluded_rows ?? 0)}</b> 行样本不进入分流校验、指标检验和建议。</p>`
+              : '<p class="muted" style="margin:0">还没有生效区间：页面显示的是全量样本，仅供录入核对，不能用于决策。</p>'
+          }
+          <div>${(samples.analysis?.segments || []).map((item) => `<span class="badge info mono">${esc(item.start)} ~ ${esc(item.end)}</span>`).join(' ') || ''}</div>
+          ${
+            versions.items.some((item) => item.failure_reason && item.status === 'draft')
+              ? `<p class="fail" style="margin:0">最近一次登记区间发布失败：${esc(
+                  versions.items.find((item) => item.failure_reason && item.status === 'draft').failure_reason,
+                )}；实验仍沿用上一版生效结果。</p>`
+              : ''
+          }
         </div>
       </section>
 
@@ -268,6 +347,11 @@ export const assignmentsPage = {
       </div>
 
       <section class="panel">
+        <div class="panel-head"><h2>分析版本台账</h2><span class="meta">共 ${versions.total} 个 · 生效版本才可出决策</span></div>
+        ${versionsTable(versions.items)}
+      </section>
+
+      <section class="panel">
         <div class="panel-head"><h2>分流样表明细</h2><span class="meta">${rows.total} 行 · 最近 ${rows.items.length} 行</span></div>
         ${table({
           rows: rows.items,
@@ -296,25 +380,9 @@ export const assignmentsPage = {
       assignmentsPage.render(view, ctx);
     });
     view.querySelector('#entry-sample')?.addEventListener('click', () => openEntry(view, ctx, experiments));
-    view.querySelector('#run-srm')?.addEventListener('click', async (event) => {
-      const button = event.currentTarget;
-      button.disabled = true;
-      button.textContent = '校验中…';
-      try {
-        const result = await api.post(`/api/experiments/${experiment.id}/srm-check`, {});
-        toast(
-          result.alarm
-            ? `SRM 告警：χ²=${Number(result.chi2).toFixed(2)}，p=${fmtP(result.p_value)}`
-            : `分流均衡：χ²=${Number(result.chi2).toFixed(2)}，p=${fmtP(result.p_value)}`,
-          result.alarm ? 'err' : '',
-        );
-        await assignmentsPage.render(view, ctx);
-      } catch (err) {
-        toast(errorMessage(err), 'err');
-        button.disabled = false;
-        button.textContent = '跑 SRM 校验';
-      }
-    });
+    view.querySelector('#run-analysis')?.addEventListener('click', () =>
+      openAnalysis(view, ctx, { ...experiment, currentSegments: samples.analysis?.segments || experiment.analysis?.interval_segments || [] }),
+    );
   },
 };
 

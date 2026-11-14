@@ -1,5 +1,6 @@
 import { api } from '../api.js';
 import { ENUMS, can, verdictTone } from '../config.js';
+import { versionLine, versionSelect } from '../analysis.js';
 import {
   badge,
   drawer,
@@ -19,7 +20,7 @@ import {
   toast,
 } from '../ui.js';
 
-const state = { experimentId: '', variantCode: 'all', method: 'bh', q: '' };
+const state = { experimentId: '', variantCode: 'all', method: 'bh', q: '', versionId: '' };
 
 async function loadExperiments() {
   const data = await api.get('/api/experiments', { limit: 50 });
@@ -76,6 +77,7 @@ export const metricsPage = {
       view.innerHTML = `<section class="panel"><div class="panel-body">${errorBox('还没有实验')}</div></section>`;
       return;
     }
+    if (ctx.query.version) state.versionId = String(ctx.query.version);
     let experiment = pickExperiment(experiments, ctx.query.experiment);
     // 默认落在「有显著指标」的最近实验上，否则第一台实验
     if (!ctx.query.experiment && !state.experimentId) {
@@ -99,9 +101,29 @@ export const metricsPage = {
     }
     state.experimentId = String(experiment.id);
 
+    let versions;
+    try {
+      versions = await api.get(`/api/experiments/${experiment.id}/analysis-versions`);
+    } catch (err) {
+      versions = { items: [], total: 0 };
+    }
+    const activeVersion = versions.items.find((item) => item.status === 'active') || null;
+    if (state.versionId && !versions.items.some((item) => String(item.id) === String(state.versionId))) {
+      state.versionId = '';
+    }
+    const viewingVersion = state.versionId
+      ? versions.items.find((item) => String(item.id) === String(state.versionId))
+      : activeVersion;
+
     let data;
     try {
-      data = await api.get('/api/metrics', { experiment_id: experiment.id, q: state.q, limit: 100 });
+      data = await api.get('/api/metrics', {
+        experiment_id: experiment.id,
+        q: state.q,
+        limit: 100,
+        analysis_version_id: viewingVersion ? viewingVersion.id : undefined,
+        active_only: viewingVersion ? false : true,
+      });
     } catch (err) {
       view.innerHTML = errorBox(errorMessage(err));
       view.querySelector('#retry-btn')?.addEventListener('click', () => metricsPage.render(view, ctx));
@@ -114,16 +136,19 @@ export const metricsPage = {
     const primary = items.find((item) => item.is_primary);
     const significantCount = items.filter((item) => item.significant).length;
     const methodLabel = ENUMS.correction[items[0] ? items[0].method : state.method] || state.method;
+    const canRerun = Boolean(activeVersion) && (!viewingVersion || viewingVersion.id === activeVersion.id);
 
     view.innerHTML = `
       <section class="panel">
         <div class="panel-head">
           <h2>指标检验</h2>
           <div style="display:flex;gap:8px;align-items:center">
-            <span class="meta">${items.length} 个指标 · 校正后显著 ${significantCount} 个</span>
+            <span class="meta">${items.length} 个指标 · 校正后显著 ${significantCount} 个${viewingVersion ? ` · v${viewingVersion.revision}` : ''}</span>
             ${
-              can(ctx.user.role, 'metric:run')
-                ? '<button class="btn sm accent" id="run-metrics">跑指标检验</button>'
+              can(ctx.user.role, 'analysis:run')
+                ? `<button class="btn sm accent" id="run-metrics" ${canRerun ? '' : 'disabled'}>${
+                    activeVersion ? '按当前区间整套重跑' : '先登记可用曝光区间'
+                  }</button>`
                 : '<span class="mono muted">只读角色仅可查看</span>'
             }
           </div>
@@ -154,8 +179,22 @@ export const metricsPage = {
                 ],
               }),
               field({ label: '搜索指标', name: 'q', value: state.q, placeholder: '指标名 / 变体', grow: true }),
+              versionSelect({ versions: versions.items, value: viewingVersion ? viewingVersion.id : '', includeAll: false }),
             ],
           })}
+        </div>
+        <div class="panel-body" style="padding-top:0;display:grid;gap:6px">
+          <div>${versionLine(viewingVersion ? {
+            revision: viewingVersion.revision,
+            status: viewingVersion.status,
+            interval_label: viewingVersion.interval_label,
+            published_at: viewingVersion.published_at,
+          } : null)}</div>
+          ${
+            viewingVersion && viewingVersion.status !== 'active'
+              ? `<p class="fail" style="margin:0">这是已失效版本的结果，只能用于追溯；决策与默认导出只认当前生效版本。</p>`
+              : ''
+          }
         </div>
       </section>
 
@@ -171,6 +210,12 @@ export const metricsPage = {
                   rows: items,
                   rowClass: (row) => (row.is_primary ? 'is-primary' : ''),
                   columns: [
+                    {
+                      key: 'analysis_revision',
+                      label: '版本',
+                      className: 'mono nowrap',
+                      render: (row) => `v${esc(row.analysis_revision ?? '—')}`,
+                    },
                     {
                       key: 'metric_name',
                       label: '指标',
@@ -262,7 +307,8 @@ export const metricsPage = {
       state.variantCode = filters.querySelector('[name=variant]').value;
       state.method = filters.querySelector('[name=method]').value;
       state.q = filters.querySelector('[name=q]').value.trim();
-      location.hash = `#/metrics?experiment=${state.experimentId}`;
+      state.versionId = filters.querySelector('[name=analysis_version_id]').value;
+      location.hash = `#/metrics?experiment=${state.experimentId}${state.versionId ? `&version=${state.versionId}` : ''}`;
       metricsPage.render(view, ctx);
     });
     view.querySelectorAll('table.data tbody tr').forEach((row) => {
@@ -271,23 +317,19 @@ export const metricsPage = {
         if (item) openMetric(view, ctx, item);
       });
     });
-    view.querySelector('#run-metrics')?.addEventListener('click', async (event) => {
-      const button = event.currentTarget;
-      button.disabled = true;
-      button.textContent = '检验中…';
+    view.querySelector('#run-metrics')?.addEventListener('click', async () => {
+      if (!activeVersion || (viewingVersion && viewingVersion.id !== activeVersion.id)) return;
       try {
+        // 不新增版本：沿用当前生效版本的区间整套重算并发布
         const result = await api.post(`/api/experiments/${experiment.id}/metric-tests`, {
           method: filters.querySelector('[name=method]').value,
           variant_code: activeVariant || null,
         });
-        const total = result.total;
         const sig = (result.results || []).reduce((sum, item) => sum + item.significant_count, 0);
-        toast(`${result.method_label}：${total} 条检验，${sig} 条校正后显著`, sig ? '' : 'err');
+        toast(`v${activeVersion.revision} 整套重算：${result.total} 条检验，${sig} 条校正后显著`, sig ? '' : 'err');
         await metricsPage.render(view, ctx);
       } catch (err) {
         toast(errorMessage(err), 'err');
-        button.disabled = false;
-        button.textContent = '跑指标检验';
       }
     });
   },

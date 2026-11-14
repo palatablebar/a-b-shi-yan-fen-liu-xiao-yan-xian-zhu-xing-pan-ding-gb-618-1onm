@@ -1,9 +1,12 @@
-"""实验登记：一次 A/B 实验的元信息 + 最近一次 SRM/功效快照。"""
+"""实验登记：一次 A/B 实验的元信息 + 当前生效分析版本的 SRM/功效快照。
+
+快照字段（srm_* / active_analysis_*）只在整套发布成功时整体切换；计算失败不改这里。
+"""
 from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.models import Base
@@ -28,7 +31,18 @@ class Experiment(Base):
     started_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     ended_on: Mapped[date | None] = mapped_column(Date, nullable=True)
 
-    # ---- 算法 A 最近一次快照（POST /experiments/{id}/srm-check 写入）----
+    # ---- 当前生效的分析版本（登记可用曝光区间后整套发布时写入）----
+    active_analysis_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("analysis_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    active_interval_key: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    active_interval_segments: Mapped[list] = mapped_column(JSON, default=list)
+    active_interval_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active_analysis_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active_analysis_publication: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active_analysis_published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # ---- 算法 A 当前生效版本的快照（整套发布时同步，页面/导出只读这里）----
     srm_chi2: Mapped[float | None] = mapped_column(Float, nullable=True)
     srm_df: Mapped[int | None] = mapped_column(Integer, nullable=True)
     srm_p_value: Mapped[float | None] = mapped_column(Float, nullable=True)

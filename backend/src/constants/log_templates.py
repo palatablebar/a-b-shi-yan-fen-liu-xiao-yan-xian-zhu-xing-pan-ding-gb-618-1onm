@@ -9,6 +9,8 @@ ACTIONS: dict[str, str] = {
     "assignment.update": "更新分流样本",
     "srm.check": "跑 SRM 校验",
     "metric.check": "跑指标检验",
+    "analysis.publish": "发布分析版本",
+    "analysis.failed": "分析发布失败（沿用上一版）",
     "decision.create": "出决策",
     "export.experiments": "导出实验台账",
     "export.assignments": "导出分流样本",

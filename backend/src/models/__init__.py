@@ -9,6 +9,7 @@ class Base(DeclarativeBase):
 from src.models.user import User  # noqa: E402
 from src.models.audit import AuditLog  # noqa: E402
 from src.models.experiment import Experiment  # noqa: E402
+from src.models.analysis_version import AnalysisVersion  # noqa: E402
 from src.models.variant import Variant  # noqa: E402
 from src.models.assignment import Assignment  # noqa: E402
 from src.models.metric_result import MetricResult  # noqa: E402
@@ -19,6 +20,7 @@ __all__ = [
     "User",
     "AuditLog",
     "Experiment",
+    "AnalysisVersion",
     "Variant",
     "Assignment",
     "MetricResult",

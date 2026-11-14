@@ -11,11 +11,13 @@ from src.constants.enums import (
     SRM_STATUS_LABELS,
     VERDICT_LABELS,
 )
+from src.models.analysis_version import AnalysisVersion
 from src.models.assignment import Assignment
-from src.models.decision import Decision
 from src.models.experiment import Experiment
 from src.models.metric_result import MetricResult
 from src.models.variant import Variant
+from src.services import analysis_service, decision_service
+from src.services.algorithms import exposure
 from src.utils.errors import AppError, not_found
 from src.utils.timeutil import iso_date, iso_utc
 
@@ -62,6 +64,17 @@ def serialize(experiment: Experiment, *, variants: list[Variant] | None = None) 
             "power_at_current": experiment.power_at_current,
             "mde_at_current": experiment.mde_at_current,
             "payload": experiment.srm_payload or {},
+        },
+        "analysis": {
+            "version_id": experiment.active_analysis_version_id,
+            "revision": experiment.active_analysis_revision,
+            "publication": experiment.active_analysis_publication,
+            "interval_key": experiment.active_interval_key,
+            "interval_segments": experiment.active_interval_segments or [],
+            "interval_label": exposure.interval_label(experiment.active_interval_segments),
+            "interval_days": experiment.active_interval_days,
+            "published_at": iso_utc(experiment.active_analysis_published_at),
+            "is_active": experiment.active_analysis_version_id is not None,
         },
         "variants": [serialize_variant(item) for item in (variants or [])],
         "created_at": iso_utc(experiment.created_at),
@@ -131,21 +144,42 @@ def get_variants(db: Session, experiment_id: int) -> list[Variant]:
     )
 
 
-def detail(db: Session, experiment_id: int) -> dict:
+def detail(db: Session, experiment_id: int, *, analysis_version_id: int | None = None) -> dict:
     experiment = get_experiment(db, experiment_id)
     variants = get_variants(db, experiment_id)
-    decision = db.scalar(select(Decision).where(Decision.experiment_id == experiment_id))
-    metrics = db.scalars(
-        select(MetricResult).where(MetricResult.experiment_id == experiment_id).order_by(MetricResult.metric_key)
-    ).all()
-    # 只统计主指标口径，避免 3 个指标的样本被重复相加
-    sample_rows = db.execute(
-        select(func.sum(Assignment.samples), func.sum(Assignment.conversions), func.count())
-        .where(Assignment.experiment_id == experiment_id, Assignment.metric_key == experiment.primary_metric)
-    ).one()
+    decision = decision_service.get_by_experiment(db, experiment_id)
+    decision_history = decision_service.history_by_experiment(db, experiment_id)
+    version = analysis_service.active_version(db, experiment)
+    selected_version = version
+    if analysis_version_id is not None:
+        selected_version = analysis_service.get_version(db, experiment, analysis_version_id)
+    version_id = selected_version.id if selected_version else None
+    if version_id is not None:
+        metrics = db.scalars(
+            select(MetricResult)
+            .where(MetricResult.analysis_version_id == version_id)
+            .order_by(MetricResult.metric_key)
+        ).all()
+    else:
+        metrics = []
+    # 主指标口径的样本合计：有生效版本时按版本区间统计，避免把整段累计
+    sample_stmt = select(func.sum(Assignment.samples), func.sum(Assignment.conversions), func.count()).where(
+        Assignment.experiment_id == experiment_id, Assignment.metric_key == experiment.primary_metric
+    )
+    segments = selected_version.segments if selected_version else None
+    interval = analysis_service.assignment_date_filter(segments)
+    if interval is not None:
+        sample_stmt = sample_stmt.where(interval)
+    sample_rows = db.execute(sample_stmt).one()
     payload = serialize(experiment, variants=variants)
     payload["sample_total"] = int(sample_rows[0] or 0)
     payload["assignment_rows"] = int(sample_rows[2] or 0)
+    payload["selected_analysis_version_id"] = version_id
+    payload["selected_analysis"] = (
+        analysis_service.serialize_version(selected_version, experiment=experiment)
+        if selected_version
+        else None
+    )
     payload["metrics"] = [
         {
             "metric_key": row.metric_key,
@@ -160,21 +194,20 @@ def detail(db: Session, experiment_id: int) -> dict:
             "method": row.method,
             "method_label": CORRECTION_LABELS.get(row.method, row.method),
             "is_primary": row.is_primary,
+            "analysis_version_id": row.analysis_version_id,
         }
         for row in metrics
     ]
+    decision_version = db.get(AnalysisVersion, decision.analysis_version_id) if decision else None
     payload["decision"] = (
-        {
-            "id": decision.id,
-            "verdict": decision.verdict,
-            "verdict_label": VERDICT_LABELS.get(decision.verdict, decision.verdict),
-            "rationale": decision.rationale,
-            "decided_by": decision.decided_by,
-            "decided_at": iso_utc(decision.decided_at),
-        }
-        if decision
-        else None
+        decision_service.serialize(decision, experiment, decision_version) if decision else None
     )
+    payload["decision_history"] = [
+        decision_service.serialize(
+            row, experiment, db.get(AnalysisVersion, row.analysis_version_id)
+        )
+        for row in decision_history
+    ]
     return payload
 
 
